@@ -1,0 +1,27 @@
+{
+  "name": "constitution-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --max-old-space-size=8192 server.js",
+    "dev": "nodemon --max-old-space-size=8192 server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@langchain/core": "^0.3.71",
+    "@langchain/textsplitters": "^0.1.0",
+    "@libsql/client": "^0.15.11",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "langchain": "^0.3.30",
+    "node-fetch": "2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
