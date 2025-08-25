@@ -17,7 +17,7 @@
     "@libsql/client": "^0.15.11",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
-    "express": "^5.1.0",
+    "express": "^4.21.2",
     "langchain": "^0.3.30",
     "node-fetch": "2"
   },
