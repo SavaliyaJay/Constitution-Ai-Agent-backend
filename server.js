@@ -715,7 +715,7 @@ async function aiBasedChunking(text, strategy = "ai", progressTracker = null) {
     }
 }
 
-// 🟢 Store constitution chunks in database with batch processing
+// 🟢 Store constitution chunks in database with batch processing and transactions
 async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTracker = null) {
   console.time("⏳ Total Database Storage");
   try {
@@ -733,21 +733,37 @@ async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTr
       }
 
       console.time(`⏳ DB Batch Insert ${batchIndex}`);
-      const batch = structuredChunks.slice(i, i + batchSize);
-      const batchEmbeddings = rawEmbeddings.slice(i, i + batchSize);
+      
+      // ✅ IMPROVEMENT 3: Using transactions for safety and performance
+      const tx = await db.transaction("write");
+      try {
+        const batch = structuredChunks.slice(i, i + batchSize);
+        const batchEmbeddings = rawEmbeddings.slice(i, i + batchSize);
 
-      for (let j = 0; j < batch.length; j++) {
-        const chunk = batch[j];
-        const embedding = batchEmbeddings[j];
-        if (embedding) {
-          await db.execute({
-            sql: `INSERT INTO constitution_chunks (chunk_text, embedding, article_section, chunk_type) VALUES (?, ?, ?, ?)`,
-            args: [chunk.text, JSON.stringify(embedding), chunk.title, chunk.type]
-          });
+        const promises = [];
+        for (let j = 0; j < batch.length; j++) {
+          const chunk = batch[j];
+          const embedding = batchEmbeddings[j];
+          if (embedding) {
+            promises.push(
+              tx.execute({
+                sql: `INSERT INTO constitution_chunks (chunk_text, embedding, article_section, chunk_type) VALUES (?, ?, ?, ?)`,
+                args: [chunk.text, JSON.stringify(embedding), chunk.title, chunk.type]
+              })
+            );
+          }
         }
+
+        await Promise.all(promises);
+        await tx.commit();
+        console.log(`✅ Processed batch ${batchIndex}/${totalBatches}`);
+        
+      } catch (err) {
+        await tx.rollback(); // Undo the batch if anything fails
+        console.error(`❌ Error in batch ${batchIndex}, rolling back:`, err);
+        throw err;
       }
 
-      console.log(`✅ Processed batch ${batchIndex}/${totalBatches}`);
       console.timeEnd(`⏳ DB Batch Insert ${batchIndex}`);
       await new Promise(resolve => setTimeout(resolve, 100));
     }
