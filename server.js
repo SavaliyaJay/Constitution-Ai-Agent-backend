@@ -19,7 +19,7 @@ app.use(express.urlencoded({
 }));
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://constitution-ai-agent.vercel.app/'], // Allow requests from your Next.js frontend
+  origin: ['http://localhost:3000', 'https://constitution-ai-agent.vercel.app'], // Allow requests from your Next.js frontend
   methods: ['GET', 'POST', 'DELETE', 'PUT'], // Allow specific methods
   credentials: true // If you're using cookies/sessions
 }));
