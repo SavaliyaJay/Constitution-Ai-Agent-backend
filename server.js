@@ -47,8 +47,6 @@ class ProgressTracker {
         'Content-Type': 'text/stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': 'http://localhost:3000',
-        'Access-Control-Allow-Headers': 'Content-Type',
       });
       this.isStreaming = true;
     }
