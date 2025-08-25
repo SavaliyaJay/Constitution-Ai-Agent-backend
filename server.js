@@ -19,9 +19,14 @@ app.use(express.urlencoded({
 }));
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://constitution-ai-agent.vercel.app'], // Allow requests from your Next.js frontend
-  methods: ['GET', 'POST', 'DELETE', 'PUT'], // Allow specific methods
+  origin: ['http://localhost:3000', 'https://constitution-ai-agent.vercel.app'],
+  methods: ['GET', 'POST', 'DELETE', 'PUT', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
 }));
+
+// Add explicit preflight handling
+app.options('*', cors());
 
 // 🟢 Initialize LibSQL (Turso) client
 const db = createClient({
