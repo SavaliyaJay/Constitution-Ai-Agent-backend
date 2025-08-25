@@ -19,7 +19,7 @@ app.use(express.urlencoded({
 }));
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://constitution-ai-agent.vercel.app'],
+  origin: ['https://constitution-ai-agent.vercel.app', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'DELETE', 'PUT', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: false
