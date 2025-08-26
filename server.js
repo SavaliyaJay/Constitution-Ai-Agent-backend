@@ -8,9 +8,8 @@ const app = express();
 const PORT = 5000;
 const cors = require("cors");
 
-// 🔧 FIX: Increase payload size limit for large constitution documents
 app.use(express.json({
-  limit: '50mb',  // Increase limit to 50MB
+  limit: '50mb',
   extended: true
 }));
 app.use(express.urlencoded({
@@ -25,16 +24,15 @@ app.use(cors({
   credentials: false
 }));
 
-// Add explicit preflight handling
 app.options('*', cors());
 
-// 🟢 Initialize LibSQL (Turso) client
+// Initialize LibSQL (Turso) client
 const db = createClient({
-  url: process.env.LIBSQL_DB_URL, // Your Turso database URL
-  authToken: process.env.LIBSQL_DB_AUTH, // Your Turso auth token
+  url: process.env.LIBSQL_DB_URL,
+  authToken: process.env.LIBSQL_DB_AUTH,
 });
 
-// 🆕 Progress Tracking Class
+// Progress Tracking Class
 class ProgressTracker {
   constructor(res) {
     this.res = res;
@@ -55,7 +53,7 @@ class ProgressTracker {
   updateProgress(progress, stage) {
     if (this.isStreaming) {
       this.res.write(`data: ${JSON.stringify({ type: 'progress', progress, stage })}\n\n`);
-      console.log(`📊 Progress: ${progress}% - ${stage}`);
+      console.log(`Progress: ${progress}% - ${stage}`);
     }
   }
 
@@ -74,23 +72,21 @@ class ProgressTracker {
   }
 }
 
-// 🟢 Initialize database tables with vector indexes
+// Initialize database tables with vector indexes
 async function initializeDatabase() {
-  console.time("⏳ Database Initialization");
+  console.time("Database Initialization");
   try {
-    // Create table for storing constitution chunks and embeddings
     await db.execute(`
       CREATE TABLE IF NOT EXISTS constitution_chunks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chunk_text TEXT NOT NULL,
         embedding TEXT NOT NULL,
         article_section TEXT,
-        chunk_type TEXT, -- Added to store the type of chunk (e.g., preamble, article, schedule)
+        chunk_type TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Create table for storing user queries and responses
     await db.execute(`
       CREATE TABLE IF NOT EXISTS user_queries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +97,6 @@ async function initializeDatabase() {
       )
     `);
 
-    // Add index for faster retrieval on common filter fields
     await db.execute(`
       CREATE INDEX IF NOT EXISTS idx_chunk_type ON constitution_chunks(chunk_type)
     `);
@@ -110,31 +105,43 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_article_section ON constitution_chunks(article_section)
     `);
 
-    console.log("✅ Database tables and indexes initialized successfully");
+    console.log("Database tables and indexes initialized successfully");
   } catch (error) {
-    console.error("❌ Error initializing database:", error);
+    console.error("Error initializing database:", error);
   } finally {
-    console.timeEnd("⏳ Database Initialization");
+    console.timeEnd("Database Initialization");
   }
 }
 
-// 🟢 LangChain RecursiveCharacterTextSplitter
+// Memory-optimized LangChain text splitting
 async function splitTextWithLangChain(text, chunkSize = 500, chunkOverlap = 50) {
-  console.time("⏳ LangChain Splitting");
-  const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize: chunkSize,
-    chunkOverlap: chunkOverlap,
-  });
-  const docs = await splitter.createDocuments([text]);
-  console.timeEnd("⏳ LangChain Splitting");
-  return docs.map(doc => doc.pageContent);
+  console.time("LangChain Splitting");
+  try {
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: chunkSize,
+      chunkOverlap: chunkOverlap,
+    });
+    const docs = await splitter.createDocuments([text]);
+    const result = docs.map(doc => doc.pageContent);
+    
+    // Clear references to help GC
+    docs.length = 0;
+    
+    return result;
+  } finally {
+    console.timeEnd("LangChain Splitting");
+    // Force garbage collection if available
+    if (global.gc) {
+      global.gc();
+    }
+  }
 }
 
-// 🟢 Get embeddings from Cloudflare with retry logic
+// Get embeddings from Cloudflare with retry logic and memory cleanup
 async function getEmbeddings(text) {
   const maxRetries = 3;
   let retryCount = 0;
-  console.time(`⏳ Fetching Embedding (text length: ${text.length})`);
+  console.time(`Fetching Embedding (text length: ${text.length})`);
 
   while (retryCount < maxRetries) {
     try {
@@ -162,7 +169,7 @@ async function getEmbeddings(text) {
         throw new Error("Invalid embedding data received from Cloudflare.");
       }
       
-      console.timeEnd(`⏳ Fetching Embedding (text length: ${text.length})`);
+      console.timeEnd(`Fetching Embedding (text length: ${text.length})`);
       return result.result.data[0];
 
     } catch (err) {
@@ -171,17 +178,17 @@ async function getEmbeddings(text) {
 
       if (retryCount >= maxRetries) {
         console.error("Max retries reached, throwing error");
-        console.timeEnd(`⏳ Fetching Embedding (text length: ${text.length})`);
+        console.timeEnd(`Fetching Embedding (text length: ${text.length})`);
         throw err;
       }
 
-      // Wait before retry (exponential backoff)
+      // Exponential backoff
       await new Promise(resolve => setTimeout(resolve, Math.pow(2, retryCount) * 1000));
     }
   }
 }
 
-// 🟢 Calculate cosine similarity between two vectors
+// Calculate cosine similarity between two vectors
 function cosineSimilarity(vecA, vecB) {
   const dotProduct = vecA.reduce((sum, a, i) => sum + a * vecB[i], 0);
   const magnitudeA = Math.sqrt(vecA.reduce((sum, a) => sum + a * a, 0));
@@ -189,300 +196,118 @@ function cosineSimilarity(vecA, vecB) {
   return dotProduct / (magnitudeA * magnitudeB);
 }
 
-// -----------------------------------------------------------
-// 🟢 Smart Logical Chunking Functions (Regex-based Approach)
-// -----------------------------------------------------------
+// MEMORY OPTIMIZATION: Chunking functions with improved memory management
 const PREAMBLE_PATTERN = /WE,?\s+THE\s+PEOPLE\s+OF\s+INDIA/i;
 const PART_PATTERN = /(PART\s+[IVX]+[A-Z]*\s*[-–—]?\s*[A-Z\s.,-]+)/gi;
-const CHAPTER_PATTERN = /(CHAPTER\s+[IVX]+[A-Z]*\.?\s*[-–—]?\s*[A-Z\s.,-]+)/gi;
-const CONCEPTUAL_SUBHEADING_PATTERN = /(?:^|\n)\s*([A-Z][A-Za-z\s,\-]*[A-Za-z]\.?)(?:\s*[\r\n]+\s*(?!\s*(?:PART|CHAPTER|\d+[A-Z]*\.|\S+\s+SCHEDULE|APPENDIX|___\n))(?=\S))?/gm;
 const ARTICLE_HEADER_PATTERN = /(?:^|\n)\s*(\d+[A-Z]*)\.\s*([^\n]+)/gm;
 const SCHEDULE_PATTERN = /((?:THE\s+)?(?:FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH|ELEVENTH|TWELFTH)\s+SCHEDULE)/gi;
 const APPENDIX_PATTERN = /(APPENDIX\s+[IVX]+(?:\s*[-–—]?\s*[A-Z\s.,-]+)?)/gi;
 
 async function splitByArticles(parentTitle, text) {
-    const chunks = [];
-    const articleMatches = [...text.matchAll(ARTICLE_HEADER_PATTERN)];
-    let lastIndex = 0;
-
-    for (let i = 0; i < articleMatches.length; i++) {
-        const currentArticleMatch = articleMatches[i];
-        const nextArticleMatch = articleMatches[i + 1];
-
-        if (currentArticleMatch.index > lastIndex) {
-            const precedingText = text.substring(lastIndex, currentArticleMatch.index).trim();
-            if (precedingText.length > 50) {
-                chunks.push({
-                    title: `${parentTitle} - Introduction`,
-                    text: precedingText,
-                    type: "article_intro"
-                });
-            }
-        }
-
-        const articleNumber = currentArticleMatch[1];
-        const articleTitleLine = currentArticleMatch[2].trim();
-        const articleContentStart = currentArticleMatch.index;
-        const articleContentEnd = nextArticleMatch ? nextArticleMatch.index : text.length;
-        const fullArticleText = text.substring(articleContentStart, articleContentEnd).trim();
-
-        const finalChunkTitle = `${parentTitle} - Article ${articleNumber}: ${articleTitleLine}`;
-
-        if (fullArticleText.length > 1500) {
-            console.log(`        ⚠️ Article ${articleNumber} is very long (${fullArticleText.length} chars), further splitting with LangChain...`);
-            const subDocs = await splitTextWithLangChain(fullArticleText, 500, 50);
-            subDocs.forEach((doc, idx) => {
-                chunks.push({
-                    title: `${finalChunkTitle} (Part ${idx + 1})`,
-                    text: doc,
-                    type: "article_sub_part",
-                    articleNumber: articleNumber
-                });
-            });
-        } else if (fullArticleText.length > 50) {
-            chunks.push({
-                title: finalChunkTitle,
-                text: fullArticleText,
-                type: "article",
-                articleNumber: articleNumber
-            });
-        }
-        lastIndex = articleContentEnd;
-    }
-
-    if (lastIndex < text.length) {
-        const trailingText = text.substring(lastIndex).trim();
-        if (trailingText.length > 50) {
-            chunks.push({
-                title: `${parentTitle} - Trailing Content`,
-                text: trailingText,
-                type: "trailing_content"
-            });
-        }
-    }
-
-    if (articleMatches.length === 0 && text.length > 100) {
-        if (text.length > 3000) {
-            console.log(`        ⚠️ Large un-articled section in "${parentTitle}" (${text.length} chars), using LangChain.`);
-            const subDocs = await splitTextWithLangChain(text);
-            subDocs.forEach((doc, idx) => {
-                chunks.push({
-                    title: `${parentTitle} (Section ${idx + 1})`,
-                    text: doc,
-                    type: "generic_section_fallback"
-                });
-            });
-        } else {
-            chunks.push({
-                title: `${parentTitle} (General Section)`,
-                text: text,
-                type: "generic_section"
-            });
-        }
-    }
-    return chunks;
-}
-
-async function splitByConceptualHeadings(parentTitle, text) {
-    const chunks = [];
-    CONCEPTUAL_SUBHEADING_PATTERN.lastIndex = 0;
-    const subHeadingMatches = [...text.matchAll(CONCEPTUAL_SUBHEADING_PATTERN)];
-    let lastIndex = 0;
-
-    for (let i = 0; i < subHeadingMatches.length; i++) {
-        const currentSubHeadingMatch = subHeadingMatches[i];
-        const nextSubHeadingMatch = subHeadingMatches[i + 1];
-
-        if (currentSubHeadingMatch.index > lastIndex) {
-            const precedingText = text.substring(lastIndex, currentSubHeadingMatch.index).trim();
-            if (precedingText.length > 50) {
-                chunks.push({
-                    title: `${parentTitle} - Introduction`,
-                    text: precedingText,
-                    type: "subheading_intro"
-                });
-            }
-        }
-
-        const subHeadingTitle = currentSubHeadingMatch[1].trim();
-        const subHeadingContentStart = currentSubHeadingMatch.index + currentSubHeadingMatch[0].length;
-        const subHeadingContentEnd = nextSubHeadingMatch ? nextSubHeadingMatch.index : text.length;
-        const subHeadingTextContent = text.substring(subHeadingContentStart, subHeadingContentEnd).trim();
-
-        console.log(`      Splitting under "${subHeadingTitle}"...`);
-        const articleChunks = await splitByArticles(`${parentTitle} - ${subHeadingTitle}`, subHeadingTextContent);
-        chunks.push(...articleChunks);
-        lastIndex = subHeadingContentEnd;
-    }
-
-    if (lastIndex < text.length || subHeadingMatches.length === 0) {
-        const remainingText = text.substring(lastIndex).trim();
-        if (remainingText.length > 0) {
-            if (subHeadingMatches.length === 0) {
-                console.log(`      No sub-headings found in "${parentTitle}", splitting directly by articles.`);
-            } else {
-                console.log(`      Processing remaining text after last sub-heading in "${parentTitle}".`);
-            }
-            const articleChunks = await splitByArticles(parentTitle, remainingText);
-            chunks.push(...articleChunks);
-        }
-    }
-    return chunks;
-}
-
-async function splitByChapters(parentTitle, text, progressTracker = null) {
   const chunks = [];
-  CHAPTER_PATTERN.lastIndex = 0;
-  const chapterMatches = [...text.matchAll(CHAPTER_PATTERN)];
+  const articleMatches = [...text.matchAll(ARTICLE_HEADER_PATTERN)];
   let lastIndex = 0;
 
-  if (chapterMatches.length > 0) {
-    console.log(`    📚 Found ${chapterMatches.length} chapters in ${parentTitle}`);
-    for (let i = 0; i < chapterMatches.length; i++) {
-      const currentChapterMatch = chapterMatches[i];
-      const nextChapterMatch = chapterMatches[i + 1];
+  for (let i = 0; i < articleMatches.length; i++) {
+    const currentArticleMatch = articleMatches[i];
+    const nextArticleMatch = articleMatches[i + 1];
 
-      if (currentChapterMatch.index > lastIndex) {
-        const precedingText = text.substring(lastIndex, currentChapterMatch.index).trim();
-        if (precedingText.length > 50) {
-          chunks.push({
-            title: `${parentTitle} - Pre-Chapter Text`,
-            text: precedingText,
-            type: "chapter_intro"
-          });
-        }
+    if (currentArticleMatch.index > lastIndex) {
+      const precedingText = text.substring(lastIndex, currentArticleMatch.index).trim();
+      if (precedingText.length > 50) {
+        chunks.push({
+          title: `${parentTitle} - Introduction`,
+          text: precedingText,
+          type: "article_intro"
+        });
       }
-
-      const chapterTitle = currentChapterMatch[1].trim();
-      const chapterContentStart = currentChapterMatch.index + currentChapterMatch[0].length;
-      const chapterContentEnd = nextChapterMatch ? nextChapterMatch.index : text.length;
-      const chapterTextContent = text.substring(chapterContentStart, chapterContentEnd).trim();
-
-      const subSectionChunks = await splitByConceptualHeadings(`${parentTitle} - ${chapterTitle}`, chapterTextContent);
-      chunks.push(...subSectionChunks);
-      lastIndex = chapterContentEnd;
     }
-  } else {
-    console.log(`    No chapters found in ${parentTitle}, attempting to split by conceptual sub-headings.`);
-    const subSectionChunks = await splitByConceptualHeadings(parentTitle, text);
-    chunks.push(...subSectionChunks);
+
+    const articleNumber = currentArticleMatch[1];
+    const articleTitleLine = currentArticleMatch[2].trim();
+    const articleContentStart = currentArticleMatch.index;
+    const articleContentEnd = nextArticleMatch ? nextArticleMatch.index : text.length;
+    const fullArticleText = text.substring(articleContentStart, articleContentEnd).trim();
+    const finalChunkTitle = `${parentTitle} - Article ${articleNumber}: ${articleTitleLine}`;
+
+    if (fullArticleText.length > 1500) {
+      console.log(`Article ${articleNumber} is large (${fullArticleText.length} chars), further splitting...`);
+      const subDocs = await splitTextWithLangChain(fullArticleText, 500, 50);
+      subDocs.forEach((doc, idx) => {
+        chunks.push({
+          title: `${finalChunkTitle} (Part ${idx + 1})`,
+          text: doc,
+          type: "article_sub_part",
+          articleNumber: articleNumber
+        });
+      });
+    } else if (fullArticleText.length > 50) {
+      chunks.push({
+        title: finalChunkTitle,
+        text: fullArticleText,
+        type: "article",
+        articleNumber: articleNumber
+      });
+    }
+    lastIndex = articleContentEnd;
   }
 
+  // Handle remaining content
   if (lastIndex < text.length) {
     const trailingText = text.substring(lastIndex).trim();
     if (trailingText.length > 50) {
       chunks.push({
-        title: `${parentTitle} - Post-Chapter Text`,
+        title: `${parentTitle} - Trailing Content`,
         text: trailingText,
-        type: "chapter_outro"
+        type: "trailing_content"
       });
     }
   }
-  return chunks;
-}
 
-async function extractSchedules(originalText) {
-  const chunks = [];
-  SCHEDULE_PATTERN.lastIndex = 0;
-  const scheduleMatches = [...originalText.matchAll(SCHEDULE_PATTERN)];
-
-  for (let i = 0; i < scheduleMatches.length; i++) {
-    const currentSchedule = scheduleMatches[i];
-    const nextSchedule = scheduleMatches[i + 1];
-    const scheduleStart = currentSchedule.index;
-    const appendixIndex = originalText.indexOf('APPENDIX', scheduleStart + 1);
-    const endOfDocument = originalText.length;
-    let scheduleEnd;
-
-    if (nextSchedule) {
-      scheduleEnd = nextSchedule.index;
-    } else if (appendixIndex !== -1) {
-      scheduleEnd = appendixIndex;
+  // Handle articles not found case
+  if (articleMatches.length === 0 && text.length > 100) {
+    if (text.length > 3000) {
+      console.log(`Large un-articled section in "${parentTitle}" (${text.length} chars), using LangChain.`);
+      const subDocs = await splitTextWithLangChain(text);
+      subDocs.forEach((doc, idx) => {
+        chunks.push({
+          title: `${parentTitle} (Section ${idx + 1})`,
+          text: doc,
+          type: "generic_section_fallback"
+        });
+      });
     } else {
-      scheduleEnd = endOfDocument;
-    }
-
-    const scheduleText = originalText.substring(scheduleStart, scheduleEnd).trim();
-    const scheduleTitle = currentSchedule[1].trim();
-
-    if (scheduleText.length > 100) {
-      if (scheduleText.length > 5000) {
-          console.log(`  ⚠️ Schedule "${scheduleTitle}" is very long, splitting into sub-parts.`);
-          const subDocs = await splitTextWithLangChain(scheduleText, 1000, 100);
-          subDocs.forEach((doc, idx) => {
-              chunks.push({
-                  title: `${scheduleTitle} (Part ${idx + 1})`,
-                  text: doc,
-                  type: "schedule_part"
-              });
-          });
-      } else {
-          chunks.push({
-              title: scheduleTitle,
-              text: scheduleText,
-              type: "schedule"
-          });
-      }
+      chunks.push({
+        title: `${parentTitle} (General Section)`,
+        text: text,
+        type: "generic_section"
+      });
     }
   }
-  return chunks;
-}
 
-async function extractAppendices(originalText) {
-  const chunks = [];
-  APPENDIX_PATTERN.lastIndex = 0;
-  const appendixMatches = [...originalText.matchAll(APPENDIX_PATTERN)];
-
-  for (let i = 0; i < appendixMatches.length; i++) {
-    const currentAppendix = appendixMatches[i];
-    const nextAppendix = appendixMatches[i + 1];
-    const appendixStart = currentAppendix.index;
-    const appendixEnd = nextAppendix ? nextAppendix.index : originalText.length;
-    const appendixText = originalText.substring(appendixStart, appendixEnd).trim();
-    const appendixTitle = currentAppendix[1].trim();
-
-    if (appendixText.length > 100) {
-      if (appendixText.length > 5000) {
-          console.log(`  ⚠️ Appendix "${appendixTitle}" is very long, splitting into sub-parts.`);
-          const subDocs = await splitTextWithLangChain(appendixText, 1000, 100);
-          subDocs.forEach((doc, idx) => {
-              chunks.push({
-                  title: `${appendixTitle} (Part ${idx + 1})`,
-                  text: doc,
-                  type: "appendix_part"
-              });
-          });
-      } else {
-          chunks.push({
-              title: appendixTitle,
-              text: appendixText,
-              type: "appendix"
-          });
-      }
-    }
-  }
   return chunks;
 }
 
 async function smartLogicalChunking(text, progressTracker = null) {
-  console.time("⏳ Total Smart Logical Chunking");
-  console.log("🧠 Starting smart logical chunking (with hierarchical detection)...");
+  console.time("Smart Logical Chunking");
+  console.log("Starting smart logical chunking...");
   const allStructuredChunks = [];
 
   if (progressTracker) {
     progressTracker.updateProgress(22, 'Cleaning document text...');
   }
 
+  // Clean text
   let cleanText = text
     .replace(/Page \d+:/g, '')
     .replace(/\n\s*\n+/g, '\n\n')
     .trim();
 
+  // Extract preamble
   if (progressTracker) {
     progressTracker.updateProgress(25, 'Extracting preamble...');
   }
 
-  PREAMBLE_PATTERN.lastIndex = 0;
   const preambleMatch = cleanText.match(PREAMBLE_PATTERN);
   if (preambleMatch) {
     const preambleStart = cleanText.indexOf(preambleMatch[0]);
@@ -505,58 +330,40 @@ async function smartLogicalChunking(text, progressTracker = null) {
     }
   }
 
+  // Process parts with progress tracking
   if (progressTracker) {
     progressTracker.updateProgress(30, 'Processing document parts...');
   }
 
-  PART_PATTERN.lastIndex = 0;
   const partMatches = [...cleanText.matchAll(PART_PATTERN)];
-  let lastProcessedIndex = 0;
-
+  
   for (let i = 0; i < partMatches.length; i++) {
-    const progress = 30 + Math.round((i / partMatches.length) * 8); // 30-38%
+    const progress = 30 + Math.round((i / partMatches.length) * 20); // 30-50%
     if (progressTracker) {
       progressTracker.updateProgress(progress, `Processing Part ${i + 1} of ${partMatches.length}...`);
     }
 
     const currentPartMatch = partMatches[i];
     const nextPartMatch = partMatches[i + 1];
-
-    if (currentPartMatch.index > lastProcessedIndex) {
-      const precedingText = cleanText.substring(lastProcessedIndex, currentPartMatch.index).trim();
-      if (precedingText.length > 50) {
-        allStructuredChunks.push({
-          title: `Introductory/Transitional Text`,
-          text: precedingText,
-          type: "unclassified_section_before_part"
-        });
-      }
-    }
-
     const partTitle = currentPartMatch[1].trim();
     const partContentStart = currentPartMatch.index + currentPartMatch[0].length;
     const partContentEnd = nextPartMatch ? nextPartMatch.index : cleanText.length;
-    let partTextContent = cleanText.substring(partContentStart, partContentEnd).trim();
+    const partTextContent = cleanText.substring(partContentStart, partContentEnd).trim();
 
-    console.log(`  Processing ${partTitle}...`);
-    const partSubChunks = await splitByChapters(partTitle, partTextContent, progressTracker);
+    console.log(`Processing ${partTitle}...`);
+    const partSubChunks = await splitByArticles(partTitle, partTextContent);
     allStructuredChunks.push(...partSubChunks);
     lastProcessedIndex = partContentEnd;
-  }
 
-  if (lastProcessedIndex < cleanText.length) {
-    const trailingText = cleanText.substring(lastProcessedIndex).trim();
-    if (trailingText.length > 50) {
-      allStructuredChunks.push({
-        title: "End of Document/Unclassified",
-        text: trailingText,
-        type: "unclassified_section_end"
-      });
+    // Memory cleanup between parts
+    if (global.gc && i % 5 === 0) {
+      global.gc();
     }
   }
 
+  // Extract schedules and appendices
   if (progressTracker) {
-    progressTracker.updateProgress(38, 'Extracting schedules...');
+    progressTracker.updateProgress(50, 'Extracting schedules...');
   }
 
   const scheduleChunks = await extractSchedules(text);
@@ -567,159 +374,323 @@ async function smartLogicalChunking(text, progressTracker = null) {
 
   const finalChunks = allStructuredChunks.filter(chunk => chunk.text && chunk.text.trim().length > 50);
 
-  console.log(`✅ Smart hierarchical chunking complete: ${finalChunks.length} chunks created.`);
-  console.timeEnd("⏳ Total Smart Logical Chunking");
+  console.log(`Smart hierarchical chunking complete: ${finalChunks.length} chunks created.`);
+  console.timeEnd("Smart Logical Chunking");
+
+  // Final cleanup
+  if (global.gc) {
+    global.gc();
+  }
+
   return finalChunks;
 }
 
-// -----------------------------------------------------------
-// 🟢 NEW: Cloudflare AI-Based Chunking Function
-// -----------------------------------------------------------
-async function chunkTextWithCloudflareAI(text, progressTracker = null) {
-    console.time("⏳ Cloudflare AI Chunking");
-    
-    if (progressTracker) {
-        progressTracker.updateProgress(20, 'Sending to AI for intelligent chunking...');
+// Simplified schedule/appendix extraction functions (keeping original logic)
+async function extractSchedules(originalText) {
+  const chunks = [];
+  const scheduleMatches = [...originalText.matchAll(SCHEDULE_PATTERN)];
+
+  for (let i = 0; i < scheduleMatches.length; i++) {
+    const currentSchedule = scheduleMatches[i];
+    const nextSchedule = scheduleMatches[i + 1];
+    const scheduleStart = currentSchedule.index;
+    const appendixIndex = originalText.indexOf('APPENDIX', scheduleStart + 1);
+    const endOfDocument = originalText.length;
+    let scheduleEnd = nextSchedule ? nextSchedule.index : (appendixIndex !== -1 ? appendixIndex : endOfDocument);
+
+    const scheduleText = originalText.substring(scheduleStart, scheduleEnd).trim();
+    const scheduleTitle = currentSchedule[1].trim();
+
+    if (scheduleText.length > 100) {
+      if (scheduleText.length > 5000) {
+        const subDocs = await splitTextWithLangChain(scheduleText, 1000, 100);
+        subDocs.forEach((doc, idx) => {
+          chunks.push({
+            title: `${scheduleTitle} (Part ${idx + 1})`,
+            text: doc,
+            type: "schedule_part"
+          });
+        });
+      } else {
+        chunks.push({
+          title: scheduleTitle,
+          text: scheduleText,
+          type: "schedule"
+        });
+      }
     }
+  }
+  return chunks;
+}
 
-    // Construct a prompt that instructs the AI on how to behave.
+async function extractAppendices(originalText) {
+  const chunks = [];
+  const appendixMatches = [...originalText.matchAll(APPENDIX_PATTERN)];
+
+  for (let i = 0; i < appendixMatches.length; i++) {
+    const currentAppendix = appendixMatches[i];
+    const nextAppendix = appendixMatches[i + 1];
+    const appendixStart = currentAppendix.index;
+    const appendixEnd = nextAppendix ? nextAppendix.index : originalText.length;
+    const appendixText = originalText.substring(appendixStart, appendixEnd).trim();
+    const appendixTitle = currentAppendix[1].trim();
+
+    if (appendixText.length > 100) {
+      if (appendixText.length > 5000) {
+        const subDocs = await splitTextWithLangChain(appendixText, 1000, 100);
+        subDocs.forEach((doc, idx) => {
+          chunks.push({
+            title: `${appendixTitle} (Part ${idx + 1})`,
+            text: doc,
+            type: "appendix_part"
+          });
+        });
+      } else {
+        chunks.push({
+          title: appendixTitle,
+          text: appendixText,
+          type: "appendix"
+        });
+      }
+    }
+  }
+  return chunks;
+}
+
+// AI-based chunking with memory optimization
+async function chunkTextWithCloudflareAI(text, progressTracker = null) {
+  console.time("Cloudflare AI Chunking");
+  
+  if (progressTracker) {
+    progressTracker.updateProgress(20, 'Sending to AI for intelligent chunking...');
+  }
+
+  // Split large texts into smaller chunks for AI processing
+  const maxChunkSize = 100000; // 100KB limit for AI processing
+  const textChunks = [];
+  
+  if (text.length > maxChunkSize) {
+    console.log(`Text too large (${text.length} chars), splitting for AI processing...`);
+    for (let i = 0; i < text.length; i += maxChunkSize) {
+      textChunks.push(text.substring(i, i + maxChunkSize));
+    }
+  } else {
+    textChunks.push(text);
+  }
+
+  const allChunks = [];
+
+  for (let i = 0; i < textChunks.length; i++) {
+    const chunk = textChunks[i];
     const prompt = `
-      You are an expert legal assistant specializing in constitutional law. Your task is to split the following constitutional text into logical, self-contained chunks.
+You are an expert legal assistant specializing in constitutional law. Your task is to split the following constitutional text into logical, self-contained chunks.
 
-      Each chunk should represent a complete thought, a single legal concept, or a distinct article. Do not split in the middle of a sentence.
+Each chunk should represent a complete thought, a single legal concept, or a distinct article. Do not split in the middle of a sentence.
 
-      Return the response as a valid JSON array of objects, where each object has a "title" and a "text" property.
-      - The "title" should be a concise, descriptive heading for the chunk (e.g., "Article 14: Equality Before Law").
-      - The "text" should be the full text of that chunk.
+Return the response as a valid JSON array of objects, where each object has a "title" and a "text" property.
+- The "title" should be a concise, descriptive heading for the chunk.
+- The "text" should be the full text of that chunk.
 
-      Here is the text to process:
-      ---
-      ${text}
-      ---
+Here is the text to process:
+---
+${chunk}
+---
     `;
 
     try {
-        const response = await fetch(
-            `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`, {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    messages: [{
-                        role: "system",
-                        content: "You are a helpful assistant that splits long documents into structured JSON."
-                    }, {
-                        role: "user",
-                        content: prompt
-                    }]
-                }),
-            }
-        );
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error("Cloudflare AI Chunking Error:", errorText);
-            throw new Error(`Cloudflare API error: ${response.status}`);
+      const response = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messages: [{
+              role: "system",
+              content: "You are a helpful assistant that splits long documents into structured JSON."
+            }, {
+              role: "user",
+              content: prompt
+            }]
+          }),
         }
+      );
 
-        const result = await response.json();
-        const aiResponse = result.result.response;
+      if (!response.ok) {
+        throw new Error(`Cloudflare API error: ${response.status}`);
+      }
 
-        // The AI's response is a string, which we expect to be a JSON array. We need to parse it.
-        try {
-            const chunks = JSON.parse(aiResponse);
-            // Add a type to identify these chunks later
-            const finalChunks = chunks.map(chunk => ({
-                ...chunk,
-                type: 'ai_generated_chunk'
-            }));
+      const result = await response.json();
+      const aiResponse = result.result.response;
 
-            if (progressTracker) {
-                progressTracker.updateProgress(40, `AI chunking complete: ${finalChunks.length} chunks created`);
-            }
-
-            return finalChunks;
-        } catch (e) {
-            console.error("Failed to parse JSON response from AI:", e);
-            console.log("Raw AI Response:", aiResponse);
-            // As a fallback, return the raw response wrapped in a single chunk.
-            return [{
-                title: "Unstructured AI Chunk",
-                text: aiResponse,
-                type: 'ai_fallback_unstructured'
-            }];
-        }
-    } catch (error) {
-        console.error("Error in chunkTextWithCloudflareAI:", error);
-        // If the AI chunking fails, re-throw the error so the calling function can handle it.
-        throw error;
-    } finally {
-        console.timeEnd("⏳ Cloudflare AI Chunking");
-    }
-}
-
-// -----------------------------------------------------------
-// 🟢 UPDATED: Main Chunking Orchestrator Function
-// -----------------------------------------------------------
-async function aiBasedChunking(text, strategy = "ai", progressTracker = null) {
-    console.time(`⏳ aiBasedChunking (strategy: ${strategy})`);
-    
-    try {
-        if (progressTracker) {
-            progressTracker.updateProgress(10, `Starting ${strategy} chunking...`);
-        }
-
-        if (strategy === "ai") {
-            console.log("🧠 Using Cloudflare AI for smart chunking...");
-            return await chunkTextWithCloudflareAI(text, progressTracker);
-        } else if (strategy === "logical") {
-            console.log("🧠 Using smart logical chunking (regex-based)...");
-            return await smartLogicalChunking(text, progressTracker);
-        } else {
-            console.log("📝 Using LangChain recursive splitter as requested...");
-            if (progressTracker) {
-                progressTracker.updateProgress(20, 'Processing with LangChain splitter...');
-            }
-            const chunks = await splitTextWithLangChain(text);
-            const result = chunks.map((chunk, index) => ({
-                title: `General Section ${index + 1}`,
-                text: chunk,
-                type: "langchain_general"
-            }));
-            if (progressTracker) {
-                progressTracker.updateProgress(40, `LangChain splitting complete: ${result.length} chunks created`);
-            }
-            return result;
-        }
-    } catch (error) {
-        console.error(`❌ Chunking with strategy '${strategy}' failed:`, error.message);
-        if (progressTracker) {
-            progressTracker.updateProgress(20, 'Chunking failed, falling back to LangChain...');
-        }
-        // Fallback to a simpler method if the chosen strategy fails.
-        console.log("🔄 Falling back to LangChain recursive splitter...");
-        const chunks = await splitTextWithLangChain(text);
-        const result = chunks.map((chunk, index) => ({
-            title: `General Section ${index + 1} (Fallback)`,
-            text: chunk,
-            type: "langchain_fallback"
+      try {
+        const chunks = JSON.parse(aiResponse);
+        const processedChunks = chunks.map(chunk => ({
+          ...chunk,
+          type: 'ai_generated_chunk'
         }));
-        if (progressTracker) {
-            progressTracker.updateProgress(40, `Fallback chunking complete: ${result.length} chunks created`);
-        }
-        return result;
-    } finally {
-        console.timeEnd(`⏳ aiBasedChunking (strategy: ${strategy})`);
+        allChunks.push(...processedChunks);
+      } catch (e) {
+        console.error("Failed to parse JSON response from AI:", e);
+        allChunks.push({
+          title: `Unstructured AI Chunk ${i + 1}`,
+          text: aiResponse,
+          type: 'ai_fallback_unstructured'
+        });
+      }
+    } catch (error) {
+      console.error(`Error processing chunk ${i + 1}:`, error);
+      throw error;
     }
+  }
+
+  if (progressTracker) {
+    progressTracker.updateProgress(40, `AI chunking complete: ${allChunks.length} chunks created`);
+  }
+
+  console.timeEnd("Cloudflare AI Chunking");
+  return allChunks;
 }
 
-// 🟢 Store constitution chunks in database with batch processing and transactions
-async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTracker = null) {
-  console.time("⏳ Total Database Storage");
+// Main chunking orchestrator with memory optimization
+async function aiBasedChunking(text, strategy = "ai", progressTracker = null) {
+  console.time(`aiBasedChunking (strategy: ${strategy})`);
+  
   try {
-    console.log(`📝 Storing ${structuredChunks.length} chunks in database...`);
+    if (progressTracker) {
+      progressTracker.updateProgress(10, `Starting ${strategy} chunking...`);
+    }
+
+    let result;
+    if (strategy === "ai") {
+      console.log("Using Cloudflare AI for smart chunking...");
+      result = await chunkTextWithCloudflareAI(text, progressTracker);
+    } else if (strategy === "logical") {
+      console.log("Using smart logical chunking (regex-based)...");
+      result = await smartLogicalChunking(text, progressTracker);
+    } else {
+      console.log("Using LangChain recursive splitter...");
+      if (progressTracker) {
+        progressTracker.updateProgress(20, 'Processing with LangChain splitter...');
+      }
+      const chunks = await splitTextWithLangChain(text);
+      result = chunks.map((chunk, index) => ({
+        title: `General Section ${index + 1}`,
+        text: chunk,
+        type: "langchain_general"
+      }));
+      if (progressTracker) {
+        progressTracker.updateProgress(40, `LangChain splitting complete: ${result.length} chunks created`);
+      }
+    }
+
+    // Memory cleanup
+    if (global.gc) {
+      global.gc();
+    }
+
+    return result;
+
+  } catch (error) {
+    console.error(`Chunking with strategy '${strategy}' failed:`, error.message);
+    if (progressTracker) {
+      progressTracker.updateProgress(20, 'Chunking failed, falling back to LangChain...');
+    }
+    
+    // Fallback to simpler method
+    console.log("Falling back to LangChain recursive splitter...");
+    const chunks = await splitTextWithLangChain(text);
+    const result = chunks.map((chunk, index) => ({
+      title: `General Section ${index + 1} (Fallback)`,
+      text: chunk,
+      type: "langchain_fallback"
+    }));
+    
+    if (progressTracker) {
+      progressTracker.updateProgress(40, `Fallback chunking complete: ${result.length} chunks created`);
+    }
+    
+    return result;
+  } finally {
+    console.timeEnd(`aiBasedChunking (strategy: ${strategy})`);
+  }
+}
+
+// CRITICAL MEMORY OPTIMIZATION: Batch processing for embeddings with cleanup
+async function processEmbeddingsInBatches(chunks, progressTracker = null) {
+  console.time("Batch Embedding Processing");
+  
+  const embeddingsArray = [];
+  const failedEmbeddings = [];
+  const batchSize = 5; // Process 5 embeddings at a time
+  const totalBatches = Math.ceil(chunks.length / batchSize);
+  
+  for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+    const startIdx = batchIndex * batchSize;
+    const endIdx = Math.min(startIdx + batchSize, chunks.length);
+    const batch = chunks.slice(startIdx, endIdx);
+    
+    const progress = 45 + Math.round((batchIndex / totalBatches) * 35); // 45-80%
+    if (progressTracker) {
+      progressTracker.updateProgress(progress, `Processing embeddings batch ${batchIndex + 1}/${totalBatches}`);
+    }
+    
+    console.log(`Processing embedding batch ${batchIndex + 1}/${totalBatches} (${startIdx + 1}-${endIdx})`);
+    
+    // Process batch in parallel but with limited concurrency
+    const batchPromises = batch.map(async (chunk, localIndex) => {
+      const globalIndex = startIdx + localIndex;
+      try {
+        const embedding = await getEmbeddings(chunk.text);
+        return { index: globalIndex, embedding, success: true };
+      } catch (error) {
+        console.error(`Failed to embed chunk ${globalIndex + 1}:`, error.message);
+        return { 
+          index: globalIndex, 
+          error: {
+            index: globalIndex,
+            title: chunk.title,
+            text_snippet: chunk.text.substring(0, 100) + "...",
+            error: error.message
+          }, 
+          success: false 
+        };
+      }
+    });
+    
+    const batchResults = await Promise.all(batchPromises);
+    
+    // Process results
+    batchResults.forEach(result => {
+      if (result.success) {
+        embeddingsArray[result.index] = result.embedding;
+      } else {
+        embeddingsArray[result.index] = null;
+        failedEmbeddings.push(result.error);
+      }
+    });
+    
+    // Memory cleanup between batches
+    if (global.gc) {
+      global.gc();
+    }
+    
+    // Rate limiting between batches
+    if (batchIndex < totalBatches - 1) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+  
+  console.timeEnd("Batch Embedding Processing");
+  return { embeddingsArray, failedEmbeddings };
+}
+
+// Store chunks with optimized batch processing and transactions
+async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTracker = null) {
+  console.time("Database Storage");
+  try {
+    console.log(`Storing ${structuredChunks.length} chunks in database...`);
 
     const batchSize = 10;
     const totalBatches = Math.ceil(structuredChunks.length / batchSize);
@@ -732,9 +703,9 @@ async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTr
         progressTracker.updateProgress(progress, `Storing batch ${batchIndex}/${totalBatches} in database...`);
       }
 
-      console.time(`⏳ DB Batch Insert ${batchIndex}`);
+      console.time(`DB Batch Insert ${batchIndex}`);
       
-      // ✅ IMPROVEMENT 3: Using transactions for safety and performance
+      // Using transactions for safety and performance
       const tx = await db.transaction("write");
       try {
         const batch = structuredChunks.slice(i, i + batchSize);
@@ -756,15 +727,20 @@ async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTr
 
         await Promise.all(promises);
         await tx.commit();
-        console.log(`✅ Processed batch ${batchIndex}/${totalBatches}`);
+        console.log(`Processed batch ${batchIndex}/${totalBatches}`);
         
       } catch (err) {
-        await tx.rollback(); // Undo the batch if anything fails
-        console.error(`❌ Error in batch ${batchIndex}, rolling back:`, err);
+        await tx.rollback();
+        console.error(`Error in batch ${batchIndex}, rolling back:`, err);
         throw err;
       }
 
-      console.timeEnd(`⏳ DB Batch Insert ${batchIndex}`);
+      console.timeEnd(`DB Batch Insert ${batchIndex}`);
+      
+      // Memory cleanup and rate limiting
+      if (global.gc && batchIndex % 3 === 0) {
+        global.gc();
+      }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
 
@@ -772,19 +748,101 @@ async function storeChunksInDatabase(structuredChunks, rawEmbeddings, progressTr
       progressTracker.updateProgress(98, 'Database storage complete!');
     }
 
-    console.log(`✅ Successfully stored ${structuredChunks.length} chunks in database`);
+    console.log(`Successfully stored ${structuredChunks.length} chunks in database`);
   } catch (error) {
-    console.error("❌ Error storing chunks in database:", error);
+    console.error("Error storing chunks in database:", error);
     throw error;
   } finally {
-    console.timeEnd("⏳ Total Database Storage");
+    console.timeEnd("Database Storage");
   }
 }
 
-// 🟢 NEW: Expand user query with AI for better context
+// CRITICAL MEMORY FIX: Paginated vector search instead of loading all chunks
+async function searchRelevantSections(queryEmbedding, limit = 5, chunkTypeFilter = null) {
+  console.time("Paginated Vector Search");
+  try {
+    const batchSize = 1000; // Process chunks in batches of 1000
+    let offset = 0;
+    let allSimilarities = [];
+    let hasMore = true;
+
+    while (hasMore) {
+      // Build query with pagination
+      let sql = "SELECT * FROM constitution_chunks";
+      let args = [];
+
+      if (chunkTypeFilter) {
+        sql += " WHERE chunk_type = ?";
+        args.push(chunkTypeFilter);
+      }
+
+      sql += " LIMIT ? OFFSET ?";
+      args.push(batchSize, offset);
+
+      const result = await db.execute({ sql, args });
+      const chunks = result.rows;
+
+      if (chunks.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      // Process this batch of chunks
+      const batchSimilarities = chunks.map(chunk => {
+        try {
+          const chunkEmbedding = JSON.parse(chunk.embedding);
+          const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
+          return { ...chunk, similarity };
+        } catch (e) {
+          console.error(`Error parsing embedding JSON for chunk ID ${chunk.id}:`, e);
+          return { ...chunk, similarity: -1 };
+        }
+      });
+
+      // Only keep chunks above similarity threshold
+      const relevantBatchChunks = batchSimilarities.filter(chunk => chunk.similarity > 0.3);
+      allSimilarities.push(...relevantBatchChunks);
+
+      // Update offset for next batch
+      offset += batchSize;
+      
+      // If we got fewer chunks than batch size, we've reached the end
+      if (chunks.length < batchSize) {
+        hasMore = false;
+      }
+
+      // Memory cleanup between batches
+      chunks.length = 0;
+      batchSimilarities.length = 0;
+      if (global.gc && offset % (batchSize * 3) === 0) {
+        global.gc();
+      }
+    }
+
+    // Sort all results and return top matches
+    const topResults = allSimilarities
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, limit);
+      
+    console.log(`Found ${topResults.length} relevant sections from ${offset} total chunks processed`);
+    return topResults;
+
+  } catch (error) {
+    console.error("Error in paginated vector search:", error);
+    throw error;
+  } finally {
+    console.timeEnd("Paginated Vector Search");
+    // Final cleanup
+    if (global.gc) {
+      global.gc();
+    }
+  }
+}
+
+// Expand user query with AI for better context
 async function expandQueryWithAI(query) {
-  console.time("⏳ AI Query Expansion");
-  console.log(`🧠 Expanding query with AI: "${query}"`);
+  console.time("AI Query Expansion");
+  console.log(`Expanding query with AI: "${query}"`);
 
   const prompt = `You are a legal expert specializing in constitutional law. Your task is to expand the following user query to improve its chances of finding relevant articles in a constitutional database.
 
@@ -811,8 +869,8 @@ Expanded Query:`;
             role: "user",
             content: prompt
           }],
-          max_tokens: 256, // Keep it concise for embedding
-          temperature: 0.2 // Low temperature for more focused expansion
+          max_tokens: 256,
+          temperature: 0.2
         }),
       }
     );
@@ -825,66 +883,21 @@ Expanded Query:`;
     const result = await response.json();
     const expandedQuery = result.result.response.trim();
 
-    console.log(`✅ Expanded Query: "${expandedQuery}"`);
+    console.log(`Expanded Query: "${expandedQuery}"`);
     return expandedQuery;
 
   } catch (error) {
-    console.error("❌ Error expanding query with AI:", error.message);
-    // If expansion fails, fall back to the original query
-    console.log("🔄 Falling back to the original query for embedding.");
+    console.error("Error expanding query with AI:", error.message);
+    console.log("Falling back to the original query for embedding.");
     return query;
   } finally {
-    console.timeEnd("⏳ AI Query Expansion");
+    console.timeEnd("AI Query Expansion");
   }
 }
 
-// 🟢 Optimized search for relevant constitution sections with pre-filtering
-async function searchRelevantSections(queryEmbedding, limit = 5, chunkTypeFilter = null) {
-  console.time("⏳ Optimized Vector Search");
-  try {
-    // Pre-filter by chunk type if specified
-    let sql = "SELECT * FROM constitution_chunks";
-    let args = [];
-
-    if (chunkTypeFilter) {
-      sql += " WHERE chunk_type = ?";
-      args.push(chunkTypeFilter);
-    }
-
-    const result = await db.execute({ sql, args });
-    const chunks = result.rows;
-
-    // Parallel similarity calculation
-    const similarities = await Promise.all(
-      chunks.map(async (chunk) => {
-        try {
-          const chunkEmbedding = JSON.parse(chunk.embedding);
-          const similarity = cosineSimilarity(queryEmbedding, chunkEmbedding);
-          return { ...chunk, similarity };
-        } catch (e) {
-          console.error(`Error parsing embedding JSON for chunk ID ${chunk.id}:`, e);
-          return { ...chunk, similarity: -1 };
-        }
-      })
-    );
-
-    const topResults = similarities
-      .filter(chunk => chunk.similarity > 0.3) // Add similarity threshold for relevance
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, limit);
-      
-    return topResults;
-  } catch (error) {
-    console.error("❌ Error searching relevant sections:", error);
-    throw error;
-  } finally {
-    console.timeEnd("⏳ Optimized Vector Search");
-  }
-}
-
-// 🟢 Generate response using Cloudflare AI with Enhanced Prompt
+// Generate response using Cloudflare AI with Enhanced Prompt
 async function generateResponse(query, relevantSections) {
-  console.time("⏳ AI Response Generation");
+  console.time("AI Response Generation");
   try {
     const context = relevantSections
       .map(section => `### ${section.article_section}\n${section.chunk_text}`)
@@ -929,24 +942,21 @@ ${context}
     const result = await response.json();
     const aiResponse = result.result.response.trim();
 
-    console.log("✅ AI Response Generated");
+    console.log("AI Response Generated");
     return aiResponse;
 
   } catch (error) {
-    console.error("❌ Error generating AI response:", error);
+    console.error("Error generating AI response:", error);
     return "Sorry, I could not generate a response at this time.";
   } finally {
-    console.timeEnd("⏳ AI Response Generation");
+    console.timeEnd("AI Response Generation");
   }
 }
 
-// -----------------------------------------------------------
-// 🟢 API Endpoints
-// -----------------------------------------------------------
-
-// API: Process and store constitution text
+// API Endpoints
+// Process and store constitution text with memory optimization
 app.post("/process", async (req, res) => {
-  console.time("⏱️ Total /process Request");
+  console.time("Total /process Request");
   
   const progressTracker = new ProgressTracker(res);
   progressTracker.startStreaming();
@@ -958,53 +968,26 @@ app.post("/process", async (req, res) => {
       return;
     }
 
-    console.log(`📄 Received constitution text (${constitutionText.length} characters)`);
-    console.log(`🔄 Using chunking strategy: ${strategy}`);
+    console.log(`Received constitution text (${constitutionText.length} characters)`);
+    console.log(`Using chunking strategy: ${strategy}`);
 
     progressTracker.updateProgress(5, 'Processing constitution text...');
 
-    // aiBasedChunking now handles the different strategies with progress
+    // Chunking with memory optimization
     const structuredChunks = await aiBasedChunking(constitutionText, strategy, progressTracker);
-    console.log(`✅ Chunking successful: ${structuredChunks.length} chunks created using ${strategy} strategy`);
+    console.log(`Chunking successful: ${structuredChunks.length} chunks created using ${strategy} strategy`);
 
     const filteredChunks = structuredChunks.filter(chunk => chunk.text && chunk.text.trim().length > 50);
 
     progressTracker.updateProgress(45, 'Generating embeddings for chunks...');
-    console.log(`🧮 Processing embeddings for ${filteredChunks.length} filtered chunks...`);
-    console.time("⏳ Total Embedding Generation");
+    console.log(`Processing embeddings for ${filteredChunks.length} filtered chunks...`);
 
-    const rawTextsForEmbedding = filteredChunks.map(c => c.text);
-    const embeddingsArray = [];
-    const failedEmbeddings = [];
-    const totalChunksForEmbedding = rawTextsForEmbedding.length;
-
-    for (let i = 0; i < totalChunksForEmbedding; i++) {
-      const progress = 45 + Math.round((i / totalChunksForEmbedding) * 35); // 45-80%
-      progressTracker.updateProgress(progress, `Generating embeddings: ${i + 1}/${totalChunksForEmbedding}`);
-      
-      console.log(`📊 Processing embedding for chunk ${i + 1}/${totalChunksForEmbedding} (${Math.round(((i + 1) / totalChunksForEmbedding) * 100)}%)`);
-      try {
-        const embeddingVector = await getEmbeddings(rawTextsForEmbedding[i]);
-        embeddingsArray.push(embeddingVector);
-        if (i < totalChunksForEmbedding - 1) {
-          await new Promise(resolve => setTimeout(resolve, 150));
-        }
-      } catch (embeddingError) {
-        console.error(`❌ Error embedding chunk ${i + 1} (${filteredChunks[i].title}):`, embeddingError.message);
-        failedEmbeddings.push({
-          index: i,
-          title: filteredChunks[i].title,
-          text_snippet: filteredChunks[i].text.substring(0, 100) + "...",
-          error: embeddingError.message
-        });
-        embeddingsArray.push(null);
-      }
-    }
-    console.timeEnd("⏳ Total Embedding Generation");
+    // MEMORY OPTIMIZATION: Use batch processing for embeddings
+    const { embeddingsArray, failedEmbeddings } = await processEmbeddingsInBatches(filteredChunks, progressTracker);
 
     const successfulEmbeddingCount = embeddingsArray.filter(e => e !== null).length;
     const failedEmbeddingCount = failedEmbeddings.length;
-    console.log(`✅ Embedding results: ${successfulEmbeddingCount} successful, ${failedEmbeddingCount} failed`);
+    console.log(`Embedding results: ${successfulEmbeddingCount} successful, ${failedEmbeddingCount} failed`);
 
     if (successfulEmbeddingCount === 0) {
       throw new Error("All chunks failed to generate embeddings. No data stored.");
@@ -1014,7 +997,7 @@ app.post("/process", async (req, res) => {
     const finalEmbeddingsToStore = embeddingsArray.filter(e => e !== null);
 
     progressTracker.updateProgress(80, 'Storing chunks in database...');
-    console.log("💾 Storing successfully embedded chunks in database...");
+    console.log("Storing successfully embedded chunks in database...");
     await storeChunksInDatabase(finalStructuredChunksToStore, finalEmbeddingsToStore, progressTracker);
 
     const response = {
@@ -1037,65 +1020,70 @@ app.post("/process", async (req, res) => {
     progressTracker.complete(response);
 
   } catch (error) {
-    console.error("❌ Error in /process endpoint:", error);
+    console.error("Error in /process endpoint:", error);
     progressTracker.error(error);
   } finally {
-      console.timeEnd("⏱️ Total /process Request");
+    console.timeEnd("Total /process Request");
+    // Final memory cleanup
+    if (global.gc) {
+      global.gc();
+    }
   }
 });
 
-// API: Query constitution for legal guidance
+// Query constitution for legal guidance with memory optimization
 app.post("/query", async (req, res) => {
-  console.time("⏱️ Total /query Request");
+  console.time("Total /query Request");
   try {
     const { query } = req.body;
     if (!query) {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log("🔍 Processing original query:", query);
+    console.log("Processing original query:", query);
 
-    // 💡 NEW STEP: Expand the user's query for better context
+    // Expand the user's query for better context
     const expandedQuery = await expandQueryWithAI(query);
 
     // Use the expanded query for embeddings
     const queryEmbedding = await getEmbeddings(expandedQuery);
 
+    // MEMORY OPTIMIZATION: Use paginated search instead of loading all chunks
     const relevantSections = await searchRelevantSections(queryEmbedding);
 
     if (relevantSections.length === 0) {
-        const noResultsMessage = "I could not find relevant sections in the Constitution to answer your query. Please rephrase or provide more details.";
-        await db.execute({
-            sql: `INSERT INTO user_queries (query, response, relevant_chunks) VALUES (?, ?, ?)`,
-            args: [query, noResultsMessage, "[]"] // Store the original query
-        });
-        return res.status(404).json({
-            success: false,
-            query,
-            response: noResultsMessage,
-            relevantSections: []
-        });
+      const noResultsMessage = "I could not find relevant sections in the Constitution to answer your query. Please rephrase or provide more details.";
+      await db.execute({
+        sql: `INSERT INTO user_queries (query, response, relevant_chunks) VALUES (?, ?, ?)`,
+        args: [query, noResultsMessage, "[]"]
+      });
+      return res.status(404).json({
+        success: false,
+        query,
+        response: noResultsMessage,
+        relevantSections: []
+      });
     }
 
     // Pass the ORIGINAL query to the response generator
     const aiResponse = await generateResponse(query, relevantSections);
 
-    console.time("⏳ Storing Query in History");
+    console.time("Storing Query in History");
     await db.execute({
       sql: `INSERT INTO user_queries (query, response, relevant_chunks) VALUES (?, ?, ?)`,
-      args: [query, aiResponse, JSON.stringify(relevantSections.map(s => ({ // Store the original query
+      args: [query, aiResponse, JSON.stringify(relevantSections.map(s => ({
         id: s.id,
         title: s.article_section,
         type: s.chunk_type,
         similarity: s.similarity
       })))]
     });
-    console.timeEnd("⏳ Storing Query in History");
+    console.timeEnd("Storing Query in History");
 
     res.json({
       success: true,
-      query, // Return the original query to the user
-      expandedQueryForSearch: expandedQuery, // Optionally, show the expanded query for debugging
+      query,
+      expandedQueryForSearch: expandedQuery,
       response: aiResponse,
       relevantSections: relevantSections.map(section => ({
         text: section.chunk_text,
@@ -1104,18 +1092,23 @@ app.post("/query", async (req, res) => {
         chunk_type: section.chunk_type
       }))
     });
+
   } catch (error) {
-    console.error("❌ Error in /query endpoint:", error);
+    console.error("Error in /query endpoint:", error);
     res.status(500).json({
       error: "Internal server error",
       details: error.message
     });
   } finally {
-      console.timeEnd("⏱️ Total /query Request");
+    console.timeEnd("Total /query Request");
+    // Memory cleanup
+    if (global.gc) {
+      global.gc();
+    }
   }
 });
 
-// API: Get query history
+// Get query history
 app.get("/history", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
@@ -1128,9 +1121,8 @@ app.get("/history", async (req, res) => {
       queries: result.rows,
       count: result.rows.length
     });
-  }
-  catch (error) {
-    console.error("❌ Error in /history endpoint:", error);
+  } catch (error) {
+    console.error("Error in /history endpoint:", error);
     res.status(500).json({
       error: "Internal server error",
       details: error.message
@@ -1138,7 +1130,7 @@ app.get("/history", async (req, res) => {
   }
 });
 
-// API: Get constitution stats
+// Get constitution stats
 app.get("/stats", async (req, res) => {
   try {
     const chunksResult = await db.execute("SELECT COUNT(*) as total_chunks FROM constitution_chunks");
@@ -1148,10 +1140,11 @@ app.get("/stats", async (req, res) => {
       success: true,
       totalChunks: chunksResult.rows[0].total_chunks,
       totalQueries: queriesResult.rows[0].total_queries,
-      serverUptime: process.uptime()
+      serverUptime: process.uptime(),
+      memoryUsage: process.memoryUsage()
     });
   } catch (error) {
-    console.error("❌ Error in /stats endpoint:", error);
+    console.error("Error in /stats endpoint:", error);
     res.status(500).json({
       error: "Internal server error",
       details: error.message
@@ -1159,18 +1152,23 @@ app.get("/stats", async (req, res) => {
   }
 });
 
-// API: Clear all data (for testing)
+// Clear all data (for testing)
 app.delete("/clear", async (req, res) => {
   try {
     await db.execute("DELETE FROM constitution_chunks");
     await db.execute("DELETE FROM user_queries");
+
+    // Force garbage collection after clearing data
+    if (global.gc) {
+      global.gc();
+    }
 
     res.json({
       success: true,
       message: "All data cleared successfully"
     });
   } catch (error) {
-    console.error("❌ Error in /clear endpoint:", error);
+    console.error("Error in /clear endpoint:", error);
     res.status(500).json({
       error: "Internal server error",
       details: error.message
@@ -1181,7 +1179,7 @@ app.delete("/clear", async (req, res) => {
 // Default route
 app.get("/", (req, res) => {
   res.json({
-    message: "🚀 Constitution Legal Assistant API is running!",
+    message: "Constitution Legal Assistant API is running!",
     endpoints: {
       "POST /process": "Process and store constitution text. Body can include 'strategy': 'ai' (default), 'logical', or 'langchain'.",
       "POST /query": "Query constitutional provisions",
@@ -1193,19 +1191,25 @@ app.get("/", (req, res) => {
   });
 });
 
-// Health check route
+// Health check route with memory info
 app.get("/health", (req, res) => {
+  const memUsage = process.memoryUsage();
   res.json({
     status: "healthy",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    memoryUsage: process.memoryUsage()
+    memoryUsage: {
+      rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
+      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB',
+      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+      external: Math.round(memUsage.external / 1024 / 1024) + ' MB'
+    }
   });
 });
 
 // Error handling middleware
 app.use((error, req, res, next) => {
-  console.error("❌ Unhandled error:", error);
+  console.error("Unhandled error:", error);
 
   if (error.type === 'entity.too.large') {
     return res.status(413).json({
@@ -1220,18 +1224,35 @@ app.use((error, req, res, next) => {
   });
 });
 
+// Periodic garbage collection (every 5 minutes)
+if (global.gc) {
+  setInterval(() => {
+    console.log('Running periodic garbage collection...');
+    global.gc();
+    const memUsage = process.memoryUsage();
+    console.log(`Memory after GC - Heap Used: ${Math.round(memUsage.heapUsed / 1024 / 1024)} MB`);
+  }, 5 * 60 * 1000); // 5 minutes
+}
+
 // Initialize database and start server
 async function startServer() {
   try {
     await initializeDatabase();
     app.listen(PORT, () => {
-      console.log(`✅ Server running at http://localhost:${PORT}`);
-      console.log(`📚 Constitution API ready for legal queries`);
-      console.log(`🧠 Default chunking strategy: 'ai' (Cloudflare)`);
-      console.log(`🔧 Max payload size: 50MB`);
+      console.log(`Server running at http://localhost:${PORT}`);
+      console.log(`Constitution API ready for legal queries`);
+      console.log(`Default chunking strategy: 'ai' (Cloudflare)`);
+      console.log(`Max payload size: 50MB`);
+      console.log(`Node.js max heap size: ${process.env.NODE_OPTIONS || 'default'}`);
+      
+      if (global.gc) {
+        console.log('Garbage collection is available and will run periodically');
+      } else {
+        console.log('Warning: Garbage collection not available. Start with --expose-gc for better memory management');
+      }
     });
   } catch (error) {
-    console.error("❌ Failed to start server:", error);
+    console.error("Failed to start server:", error);
     process.exit(1);
   }
 }
