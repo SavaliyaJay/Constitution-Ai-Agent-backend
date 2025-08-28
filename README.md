@@ -1,6 +1,9 @@
 # Constitution AI Agent - Backend
-<img width="3454" height="1873" alt="diagram-export-25-8-2025-1_04_52-pm" src="https://github.com/user-attachments/assets/9b8089dd-b391-41dd-8f44-0eba440aee5a" />
+## 🚀 Demo
+https://github.com/user-attachments/assets/b091083a-38dd-460d-a114-42b5745c979b
 
+## 🏗️ Architecture
+<img width="100%" alt="System Architecture" src="https://github.com/user-attachments/assets/95ab9cb8-8703-4370-b8b4-03ec17f60f2a" />
 
 ## 🚀 Overview
 
