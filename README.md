@@ -1,6 +1,6 @@
 # Constitution AI Agent - Backend
 ## 🚀 Demo
-https://github.com/user-attachments/assets/b091083a-38dd-460d-a114-42b5745c979b
+https://github.com/user-attachments/assets/c6fa7743-81d6-4abc-b8f5-af32d2e73d6a
 
 ## 🏗️ Architecture
 <img width="100%" alt="System Architecture" src="https://github.com/user-attachments/assets/95ab9cb8-8703-4370-b8b4-03ec17f60f2a" />
